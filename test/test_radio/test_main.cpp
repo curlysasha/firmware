@@ -1,4 +1,5 @@
 #include "MeshRadio.h"
+#include "NodeDB.h"
 #include "RadioInterface.h"
 #include "TestUtil.h"
 #include <unity.h>
@@ -77,6 +78,77 @@ static void test_bootstrapLoRaConfigFromPreset_fallsBackIfBandwidthExceedsRegion
     TEST_ASSERT_EQUAL_UINT32(11, cfg.spread_factor);
 }
 
+static constexpr NodeNum FAVORITE = 0xb1ac0074;
+static constexpr NodeNum STRANGER = 0x12345678;
+
+class EarlyRelayNodeDB : public NodeDB
+{
+  public:
+    meshtastic_NodeInfoLite *getMeshNode(NodeNum n) override
+    {
+        if (n == FAVORITE)
+            return &favorite;
+        if (n == STRANGER)
+            return &stranger;
+        return nullptr;
+    }
+    meshtastic_NodeInfoLite favorite = {.num = FAVORITE, .is_favorite = true};
+    meshtastic_NodeInfoLite stranger = {.num = STRANGER};
+};
+
+class EarlyRelayRadio : public RadioInterface
+{
+  public:
+    ErrorCode send(meshtastic_MeshPacket *p) override { return ERRNO_OK; }
+    uint32_t getPacketTime(uint32_t totalPacketLen, bool received = false) override { return 0; }
+};
+
+static EarlyRelayNodeDB *earlyRelayNodeDB;
+
+// A relayed copy as queued by us: hop_start - hop_limit == 1 means we heard the sender directly
+static bool earlyFor(meshtastic_Config_DeviceConfig_Role role, NodeNum from, uint8_t hopStart, uint8_t hopLimit)
+{
+    config.device.role = role;
+    meshtastic_MeshPacket p = meshtastic_MeshPacket_init_zero;
+    p.from = from;
+    p.to = NODENUM_BROADCAST;
+    p.hop_start = hopStart;
+    p.hop_limit = hopLimit;
+    EarlyRelayRadio radio;
+    return radio.shouldRebroadcastEarlyLikeRouter(&p);
+}
+
+static void test_earlyRelay_clientBaseDirectFavorite()
+{
+    TEST_ASSERT_TRUE(earlyFor(meshtastic_Config_DeviceConfig_Role_CLIENT_BASE, FAVORITE, 7, 6));
+}
+
+static void test_earlyRelay_clientBaseFavoriteViaRelay()
+{
+    TEST_ASSERT_FALSE(earlyFor(meshtastic_Config_DeviceConfig_Role_CLIENT_BASE, FAVORITE, 7, 5));
+}
+
+static void test_earlyRelay_clientBaseDirectStranger()
+{
+    TEST_ASSERT_FALSE(earlyFor(meshtastic_Config_DeviceConfig_Role_CLIENT_BASE, STRANGER, 7, 6));
+}
+
+static void test_earlyRelay_clientBaseLegacyNoHopStart()
+{
+    TEST_ASSERT_FALSE(earlyFor(meshtastic_Config_DeviceConfig_Role_CLIENT_BASE, FAVORITE, 0, 2));
+}
+
+static void test_earlyRelay_clientDirectFavorite()
+{
+    TEST_ASSERT_FALSE(earlyFor(meshtastic_Config_DeviceConfig_Role_CLIENT, FAVORITE, 7, 6));
+    TEST_ASSERT_FALSE(earlyFor(meshtastic_Config_DeviceConfig_Role_ROUTER_LATE, FAVORITE, 7, 6));
+}
+
+static void test_earlyRelay_routerAlwaysEarly()
+{
+    TEST_ASSERT_TRUE(earlyFor(meshtastic_Config_DeviceConfig_Role_ROUTER, STRANGER, 7, 4));
+}
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -86,6 +158,8 @@ void setup()
     delay(2000);
 
     initializeTestEnvironment();
+    earlyRelayNodeDB = new EarlyRelayNodeDB();
+    nodeDB = earlyRelayNodeDB;
 
     UNITY_BEGIN();
     RUN_TEST(test_bwCodeToKHz_specialMappings);
@@ -94,6 +168,12 @@ void setup()
     RUN_TEST(test_bootstrapLoRaConfigFromPreset_setsDerivedFields_nonWideRegion);
     RUN_TEST(test_bootstrapLoRaConfigFromPreset_setsDerivedFields_wideRegion);
     RUN_TEST(test_bootstrapLoRaConfigFromPreset_fallsBackIfBandwidthExceedsRegionSpan);
+    RUN_TEST(test_earlyRelay_clientBaseDirectFavorite);
+    RUN_TEST(test_earlyRelay_clientBaseFavoriteViaRelay);
+    RUN_TEST(test_earlyRelay_clientBaseDirectStranger);
+    RUN_TEST(test_earlyRelay_clientBaseLegacyNoHopStart);
+    RUN_TEST(test_earlyRelay_clientDirectFavorite);
+    RUN_TEST(test_earlyRelay_routerAlwaysEarly);
     exit(UNITY_END());
 }
 
